@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>LinkX Gesture Robot</title>
+<style>
+  :root{--bg:#0d1117; --card:#161b22; --accent:#00c9a7; --accent2:#ff4d4d;
+        --text:#e6edf3; --muted:#8b949e; --border:#2d333b;}
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,'Segoe UI',Roboto,sans-serif; padding:14px 14px 40px; user-select:none;}
+  h1{font-size:1.25rem; margin:6px 0 2px;}
+  .sub{color:var(--muted); font-size:.8rem; margin-bottom:14px;}
+  .status-row{display:flex; align-items:center; gap:10px; margin-bottom:14px;}
+  .dot{width:12px;height:12px;border-radius:50%;background:var(--muted);transition:.3s;}
+  .dot.on{background:var(--accent); box-shadow:0 0 8px var(--accent);}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; margin-bottom:14px;}
+  .card h2{font-size:.85rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 10px;}
+  .bubble-wrap{width:220px; height:220px; margin:0 auto; position:relative; border-radius:50%;
+    background:radial-gradient(circle at center, #1c222b 0%, #10141a 100%); border:2px solid var(--border);}
+  .crosshair{position:absolute; top:50%; left:50%; width:1px; height:100%; background:var(--border); transform:translate(-50%,-50%);}
+  .crosshair.h{width:100%; height:1px;}
+  .bubble{width:34px; height:34px; border-radius:50%; background:var(--accent); position:absolute;
+    top:50%; left:50%; transform:translate(-50%,-50%); box-shadow:0 0 12px var(--accent); transition:transform .05s linear;}
+  .bigbtn{width:100%; padding:16px; font-size:1rem; border:none; border-radius:12px; background:var(--accent); color:#04302a; font-weight:700; margin-top:8px;}
+  .bigbtn.off{background:#21262d; color:#fff; border:1px solid var(--border);}
+  .speed-row{display:flex; gap:10px; margin-top:12px;}
+  .speed-box{flex:1; text-align:center; background:#21262d; border-radius:10px; padding:10px; border:1px solid var(--border);}
+  .speed-box .label{font-size:.7rem; color:var(--muted);}
+  .speed-box .val{font-size:1.2rem; font-weight:700;}
+  input[type="range"]{width:100%; accent-color:var(--accent);}
+  .log{max-height:120px; overflow-y:auto; font-size:.78rem; color:var(--muted); font-family:monospace;}
+  .log div{padding:3px 0; border-bottom:1px dashed var(--border);}
+</style>
+</head>
+<body>
+
+<h1>🤸 LinkX Gesture Robot</h1>
+<div class="sub">Tilt Your Phone to Drive · Proportional Differential Control</div>
+
+<div class="status-row">
+  <div id="wsDot" class="dot"></div><span id="wsText">Connecting…</span>
+</div>
+
+<div class="card">
+  <h2>Tilt Indicator</h2>
+  <div class="bubble-wrap">
+    <div class="crosshair"></div><div class="crosshair h"></div>
+    <div id="bubble" class="bubble"></div>
+  </div>
+  <button id="permBtn" class="bigbtn" onclick="requestPermission()">Enable Motion Control</button>
+  <button id="calBtn" class="bigbtn off" onclick="calibrate()" style="display:none;">Recalibrate Center</button>
+</div>
+
+<div class="card">
+  <h2>Sensitivity (max tilt = full speed)</h2>
+  <span id="sensVal">35</span>°
+  <input type="range" min="15" max="45" value="35" id="sensSlider" oninput="document.getElementById('sensVal').textContent=this.value">
+</div>
+
+<div class="card">
+  <h2>Live Motor Speed</h2>
+  <div class="speed-row">
+    <div class="speed-box"><div class="label">LEFT</div><div id="leftVal" class="val">0</div></div>
+    <div class="speed-box"><div class="label">RIGHT</div><div id="rightVal" class="val">0</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Event Log</h2>
+  <div id="logBox" class="log"><div>Waiting for events…</div></div>
+</div>
+
+<script>
+let ws, active=false, centerBeta=0, centerGamma=0;
+let lastSend = 0;
+function connect(){
+  ws = new WebSocket('ws://' + location.hostname + '/ws');
+  ws.onopen = () => setDot('on','Connected');
+  ws.onclose = () => { setDot('','Disconnected — retrying'); setTimeout(connect,1500); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    try{
+      const d = JSON.parse(e.data);
+      if(d.left !== undefined) document.getElementById('leftVal').textContent = d.left;
+      if(d.right !== undefined) document.getElementById('rightVal').textContent = d.right;
+      if(d.event) addLog(d.event);
+    }catch(err){}
+  };
+}
+function setDot(cls,text){
+  document.getElementById('wsDot').className = 'dot'+(cls?' '+cls:'');
+  document.getElementById('wsText').textContent = text;
+}
+function send(obj){ if(ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+function requestPermission(){
+  if(typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+    DeviceOrientationEvent.requestPermission().then(state=>{
+      if(state === 'granted') startMotion();
+      else addLog('Motion permission denied');
+    }).catch(()=>addLog('Motion permission error'));
+  } else {
+    startMotion(); // Android / non-iOS13+ doesn't need explicit permission
+  }
+}
+function startMotion(){
+  active = true;
+  document.getElementById('permBtn').style.display='none';
+  document.getElementById('calBtn').style.display='block';
+  window.addEventListener('deviceorientation', onOrientation);
+  addLog('Motion control enabled');
+}
+function calibrate(){
+  centerBeta = lastBeta || 0;
+  centerGamma = lastGamma || 0;
+  addLog('Recalibrated center position');
+}
+let lastBeta=0, lastGamma=0;
+function onOrientation(e){
+  lastBeta = e.beta || 0;    // front-back tilt
+  lastGamma = e.gamma || 0;  // left-right tilt
+  const beta = lastBeta - centerBeta;
+  const gamma = lastGamma - centerGamma;
+  const maxTilt = parseInt(document.getElementById('sensSlider').value);
+
+  // move the visual bubble
+  const bx = Math.max(-100, Math.min(100, (gamma/maxTilt)*100));
+  const by = Math.max(-100, Math.min(100, (beta/maxTilt)*100));
+  document.getElementById('bubble').style.transform = `translate(calc(-50% + ${bx}px), calc(-50% + ${by}px))`;
+
+  const now = Date.now();
+  if(now - lastSend > 100){ // throttle to 10Hz
+    lastSend = now;
+    send({cmd:'tilt', beta: Math.round(beta), gamma: Math.round(gamma), maxTilt});
+  }
+}
+connect();
+</script>
+</body>
+</html>
